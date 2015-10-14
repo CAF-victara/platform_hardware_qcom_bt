@@ -90,6 +90,7 @@
 #define EDL_PATCH_SET_REQ_CMD               (0x16)
 #define EDL_PATCH_ATCH_REQ_CMD            (0x17)
 #define EDL_PATCH_VER_REQ_CMD               (0x19)
+#define EDL_GET_BUILD_INFO                  (0x20)
 #define EDL_PATCH_TLV_REQ_CMD               (0x1E)
 #define EDL_WIP_QUERY_CHARGING_STATUS_CMD   (0x1D)
 #define EDL_WIP_START_HANDOFF_TO_HOST_CMD   (0x1E)
@@ -104,7 +105,8 @@
 #define EDL_WIP_QUERY_CHARGING_STATUS_EVT    (0x18)
 #define EDL_WIP_START_HANDOFF_TO_HOST_EVENT  (0x19)
 #define HCI_VS_GET_ADDON_FEATURES_EVENT      (0x1B)
-
+#define HCI_VS_GET_BUILD_VER_EVT             (0x05)
+#define HCI_VS_STRAY_EVT                (0x17)
 
 /* Status Codes of HCI CMD execution*/
 #define HCI_CMD_SUCCESS                     (0x0)
@@ -155,13 +157,25 @@
 #define ROME_NVM_TLV_1_0_3_PATH         "/system/etc/firmware/nvm_tlv_1.3.bin"
 #define ROME_RAMPATCH_TLV_2_0_1_PATH    "/system/etc/firmware/rampatch_tlv_2.1.tlv"
 #define ROME_NVM_TLV_2_0_1_PATH         "/system/etc/firmware/nvm_tlv_2.1.bin"
-#define ROME_RAMPATCH_TLV_3_0_0_PATH    "/system/etc/firmware/rampatch_tlv_3.0.tlv"
-#define ROME_NVM_TLV_3_0_0_PATH         "/system/etc/firmware/nvm_tlv_3.0.bin"
-#define ROME_RAMPATCH_TLV_3_0_2_PATH    "/system/etc/firmware/rampatch_tlv_3.2.tlv"
-#define ROME_NVM_TLV_3_0_2_PATH         "/system/etc/firmware/nvm_tlv_3.2.bin"
+#define ROME_RAMPATCH_TLV_3_0_0_PATH    "/bt_firmware/image/btfw30.tlv"
+#define ROME_NVM_TLV_3_0_0_PATH         "/bt_firmware/image/btnv30.bin"
+#define ROME_RAMPATCH_TLV_3_0_2_PATH    "/bt_firmware/image/btfw32.tlv"
+#define ROME_NVM_TLV_3_0_2_PATH         "/bt_firmware/image/btnv32.bin"
+//#define ROME_RAMPATCH_TLV_3_0_0_PATH    "/system/etc/firmware/rampatch_tlv_3.0.tlv"
+//#define ROME_NVM_TLV_3_0_0_PATH         "/system/etc/firmware/nvm_tlv_3.0.bin"
+//#define ROME_RAMPATCH_TLV_3_0_2_PATH    "/system/etc/firmware/rampatch_tlv_3.2.tlv"
+//#define ROME_NVM_TLV_3_0_2_PATH         "/system/etc/firmware/nvm_tlv_3.2.bin"
 
 #define ROME_3_1_FW_SU  "bprm.cnss.3.1"
 #define ROME_3_2_FW_SU  "btfwp.cnss.3.2"
+
+/* Rome 3.1 FW SU release has been branched from rome 3.0 SU 224
+    So, rome 3.1 formula is SU = patch version -(0xE0 = 224) - 0x111 -1
+*/
+#define ROME_3_1_FW_SW_OFFSET   0x01F2
+
+/* Rome 3.2 FW SU formula is SU = patch version - 0x111 -1 */
+#define ROME_3_2_FW_SW_OFFSET   0x0112
 
 /* This header value in rampatch file decides event handling mechanism in the HOST */
 #define ROME_SKIP_EVT_NONE     0x00

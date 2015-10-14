@@ -782,6 +782,9 @@ static int op(bt_vendor_opcode_t opcode, void *param)
                                     }
                                     ALOGV("rome_soc_init is started");
                                     property_set("wc_transport.soc_initialized", "0");
+<<<<<<< HEAD
+#ifdef BT_NV_SUPPORT
+=======
 #ifdef READ_BT_ADDR_FROM_PROP
                                     /*Give priority to read BD address from boot property*/
                                     ignore_boot_prop = FALSE;
@@ -817,7 +820,7 @@ static int op(bt_vendor_opcode_t opcode, void *param)
                                         ignore_boot_prop = TRUE;
                                     }
 #endif //READ_BT_ADDR_FROM_PROP
-#ifdef BT_NV_SUPPORT
+>>>>>>> 3296ccfd4b84a3d2c91334e7252165c124b7513b
                                     /* Always read BD address from NV file */
                                     if(ignore_boot_prop && !bt_vendor_nv_read(1, vnd_local_bd_addr))
                                     {

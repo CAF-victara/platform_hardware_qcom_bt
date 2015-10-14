@@ -33,7 +33,7 @@
 #include <stdio.h>
 #include "bt_vendor_qcom.h"
 #include "hci_uart.h"
-
+#include <string.h>
 
 /******************************************************************************
 **  Constants & Macros
@@ -357,6 +357,7 @@ void userial_vendor_set_baud(uint8_t userial_baud)
     cfsetospeed(&vnd_userial.termios, tcio_baud);
     cfsetispeed(&vnd_userial.termios, tcio_baud);
     tcsetattr(vnd_userial.fd, TCSADRAIN, &vnd_userial.termios); /* don't change speed until last write done */
+//    tcflush(vnd_userial.fd, TCIOFLUSH);
 }
 
 /*******************************************************************************

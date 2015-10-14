@@ -47,7 +47,8 @@ extern "C" {
 #include <cutils/properties.h>
 #include <stdlib.h>
 #include <termios.h>
-
+#include <string.h>
+#include <stdbool.h>
 #include "bt_hci_bdroid.h"
 #include "bt_vendor_qcom.h"
 #include "hci_uart.h"
@@ -58,6 +59,8 @@ extern "C" {
 #ifdef __cplusplus
 }
 #endif
+
+int read_vs_hci_event(int fd, unsigned char* buf, int size);
 
 /******************************************************************************
 **  Variables
@@ -74,9 +77,11 @@ static unsigned int wipower_handoff_ready = 0;
 char *rampatch_file_path;
 char *nvm_file_path;
 char *fw_su_info = NULL;
+unsigned short fw_su_offset =0;
 extern char enable_extldo;
 unsigned char wait_vsc_evt = TRUE;
-
+bool patch_dnld_pending = FALSE;
+int dnld_fd = -1;
 /******************************************************************************
 **  Extern variables
 ******************************************************************************/
@@ -85,6 +90,34 @@ extern uint8_t vnd_local_bd_addr[6];
 /*****************************************************************************
 **   Functions
 *****************************************************************************/
+int do_write(int fd, unsigned char *buf,int len)
+{
+    int ret = 0;
+    int write_offset = 0;
+    int write_len = len;
+    do {
+        ret = write(fd,buf+write_offset,write_len);
+        if (ret < 0)
+        {
+            ALOGE("%s, write failed ret = %d err = %s",__func__,ret,strerror(errno));
+            return -1;
+        } else if (ret == 0) {
+            ALOGE("%s, write failed with ret 0 err = %s",__func__,strerror(errno));
+            return 0;
+        } else {
+            if (ret < write_len) {
+                ALOGD("%s, Write pending,do write ret = %d err = %s",__func__,ret,
+                       strerror(errno));
+                write_len = write_len - ret;
+                write_offset = ret;
+            } else {
+                ALOGV("Write successful");
+                break;
+            }
+        }
+    } while(1);
+    return len;
+}
 
 int get_vs_hci_event(unsigned char *rsp)
 {
@@ -95,6 +128,8 @@ int get_vs_hci_event(unsigned char *rsp)
     unsigned int soc_id = 0;
     unsigned int productid = 0;
     unsigned short patchversion = 0;
+    char build_label[255];
+    int build_lbl_len;
 
     if( (rsp[EVENTCODE_OFFSET] == VSEVENT_CODE) || (rsp[EVENTCODE_OFFSET] == EVT_CMD_COMPLETE))
         ALOGI("%s: Received HCI-Vendor Specific event", __FUNCTION__);
@@ -187,6 +222,19 @@ int get_vs_hci_event(unsigned char *rsp)
                         break;
                     }
             break;
+            case HCI_VS_GET_BUILD_VER_EVT:
+                build_lbl_len = rsp[5];
+                memcpy (build_label, &rsp[6], build_lbl_len);
+                *(build_label+build_lbl_len) = '\0';
+
+                ALOGI("BT SoC FW SU Build info: %s, %d", build_label, build_lbl_len);
+                if (NULL != (btversionfile = fopen(BT_VERSION_FILEPATH, "a+b"))) {
+                    fprintf(btversionfile, "Bluetooth Contoller SU Build info  : %s\n", build_label);
+                    fclose(btversionfile);
+                } else {
+                    ALOGI("Failed to dump  FW SU build info. Errno:%d", errno);
+                }
+            break;
         }
         break;
 
@@ -204,9 +252,14 @@ int get_vs_hci_event(unsigned char *rsp)
             }
             break;
        case EDL_WIP_QUERY_CHARGING_STATUS_EVT:
-            /*TODO: rsp code 00 mean no charging
-            this is going to change in FW soon*/
-            if (rsp[4] != EMBEDDED_MODE_CHECK)
+            /* Query charging command has below return values
+            0 - in embedded mode not charging
+            1 - in embedded mode and charging
+            2 - hadofff completed and in normal mode
+            3 - no wipower supported on mtp. so irrepective of charging
+            handoff command has to be sent if return values are 0 or 1.
+            These change include logic to enable generic BT turn on sequence.*/
+            if (rsp[4] < EMBEDDED_MODE_CHECK)
             {
                ALOGI("%s: WiPower Charging in Embedded Mode!!!", __FUNCTION__);
                wipower_handoff_ready = rsp[4];
@@ -226,6 +279,21 @@ int get_vs_hci_event(unsigned char *rsp)
             {
                ALOGD("%s: WiPower feature supported!!", __FUNCTION__);
                property_set("persist.bluetooth.a4wp", "true");
+            }
+            break;
+        case HCI_VS_STRAY_EVT:
+            /* WAR to handle stray Power Apply EVT during patch download */
+            ALOGD("%s: Stray HCI VS EVENT", __FUNCTION__);
+            if (patch_dnld_pending && dnld_fd != -1)
+            {
+                unsigned char rsp[HCI_MAX_EVENT_SIZE];
+                memset(rsp, 0x00, HCI_MAX_EVENT_SIZE);
+                read_vs_hci_event(dnld_fd, rsp, HCI_MAX_EVENT_SIZE);
+            }
+            else
+            {
+                ALOGE("%s: Not a valid status!!!", __FUNCTION__);
+                err = -1;
             }
             break;
         default:
@@ -270,7 +338,7 @@ int read_vs_hci_event(int fd, unsigned char* buf, int size)
     while (count < 3) {
             r = read(fd, buf + count, 3 - count);
             if ((r <= 0) || (buf[1] != 0xFF )) {
-                ALOGE("It is not VS event !!");
+                ALOGE("It is not VS event !! ret: %d, EVT: %d", r, buf[1]);
                 return -1;
             }
             count += r;
@@ -307,7 +375,7 @@ int hci_send_wipower_vs_cmd(int fd, unsigned char *cmd, unsigned char *rsp, int 
     int err = 0;
 
     /* Send the HCI command packet to UART for transmission */
-    ret = write(fd, cmd, size);
+    ret = do_write(fd, cmd, size);
     if (ret != size) {
         ALOGE("%s: WP Send failed with ret value: %d", __FUNCTION__, ret);
         goto failed;
@@ -331,7 +399,7 @@ int hci_send_vs_cmd(int fd, unsigned char *cmd, unsigned char *rsp, int size)
     int ret = 0;
 
     /* Send the HCI command packet to UART for transmission */
-    ret = write(fd, cmd, size);
+    ret = do_write(fd, cmd, size);
     if (ret != size) {
         ALOGE("%s: Send failed with ret value: %d", __FUNCTION__, ret);
         goto failed;
@@ -421,6 +489,11 @@ void frame_hci_cmd_pkt(
             segtNo, cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5]);
             offset = (segtNo * MAX_SIZE_PER_TLV_SEGMENT);
             memcpy(&cmd[6], (pdata_buffer + offset), size);
+            break;
+        case EDL_GET_BUILD_INFO:
+            ALOGD("%s: Sending EDL_GET_BUILD_INFO", __FUNCTION__);
+            ALOGD("HCI-CMD %d:\t0x%x \t0x%x \t0x%x \t0x%x \t0x%x",
+                segtNo, cmd[0], cmd[1], cmd[2], cmd[3], cmd[4]);
             break;
         default:
             ALOGE("%s: Unknown EDL CMD !!!", __FUNCTION__);
@@ -725,7 +798,7 @@ int rome_rampatch_reset(int fd)
     size = (HCI_CMD_IND + HCI_COMMAND_HDR_SIZE + EDL_PATCH_CMD_LEN);
 
     /* Send HCI Command packet to Controller */
-    err = write(fd, cmd, size);
+    err = do_write(fd, cmd, size);
     if (err != size) {
         ALOGE("%s: Send failed with ret value: %d", __FUNCTION__, err);
         goto error;
@@ -803,18 +876,6 @@ int rome_get_tlv_file(char *file_path)
         ALOGI("Product ID\t\t\t : 0x%04x\n", ptlv_header->tlv.patch.prod_id);
         ALOGI("Rom Build Version\t\t : 0x%04x\n", ptlv_header->tlv.patch.build_ver);
         ALOGI("Patch Version\t\t : 0x%04x\n", ptlv_header->tlv.patch.patch_ver);
-        if (fw_su_info ) {
-            FILE *btversionfile = 0;
-            if (NULL != (btversionfile = fopen(BT_VERSION_FILEPATH, "a+b"))) {
-                fprintf(btversionfile, "Bluetooth Controller FW SU Version : 0x%04x (%s-%05d)\n",
-                    ptlv_header->tlv.patch.patch_ver,
-                    fw_su_info,
-                    (ptlv_header->tlv.patch.patch_ver - 0x0111 -1 )
-                    );
-                fclose(btversionfile);
-            }
-        }
-
         ALOGI("Reserved\t\t\t : 0x%x\n", ptlv_header->tlv.patch.reserved2);
         ALOGI("Patch Entry Address\t\t : 0x%x\n", (ptlv_header->tlv.patch.patch_entry_addr));
         ALOGI("====================================================");
@@ -971,8 +1032,10 @@ int rome_tlv_dnld_req(int fd, int tlv_size)
              }
         }
 
+        patch_dnld_pending = TRUE;
         if((err = rome_tlv_dnld_segment(fd, i, MAX_SIZE_PER_TLV_SEGMENT, wait_cc_evt )) < 0)
             goto error;
+        patch_dnld_pending = FALSE;
     }
 
     if ((rome_ver >= ROME_VER_1_1) && (rome_ver < ROME_VER_3_2) && (gTlv_type == TLV_TYPE_PATCH)) {
@@ -994,10 +1057,11 @@ int rome_tlv_dnld_req(int fd, int tlv_size)
            wait_vsc_evt = remain_size ? TRUE: FALSE;
         }
     }
-
+    patch_dnld_pending = TRUE;
     if(remain_size) err =rome_tlv_dnld_segment(fd, i, remain_size, wait_cc_evt);
-
+    patch_dnld_pending = FALSE;
 error:
+    if(patch_dnld_pending) patch_dnld_pending = FALSE;
     return err;
 }
 
@@ -1332,6 +1396,36 @@ error:
 
 }
 
+int rome_get_build_info_req(int fd)
+{
+    int size, err = 0;
+    unsigned char cmd[HCI_MAX_CMD_SIZE];
+    unsigned char rsp[HCI_MAX_EVENT_SIZE];
+
+    /* Frame the HCI CMD to be sent to the Controller */
+    frame_hci_cmd_pkt(cmd, EDL_GET_BUILD_INFO, 0,
+    -1, EDL_PATCH_CMD_LEN);
+
+    /* Total length of the packet to be sent to the Controller */
+    size = (HCI_CMD_IND + HCI_COMMAND_HDR_SIZE + EDL_PATCH_CMD_LEN);
+
+    /* Send HCI Command packet to Controller */
+    err = hci_send_vs_cmd(fd, (unsigned char *)cmd, rsp, size);
+    if ( err != size) {
+        ALOGE("Failed to send get build info cmd to the SoC!");
+        goto error;
+    }
+
+    err = read_hci_event(fd, rsp, HCI_MAX_EVENT_SIZE);
+    if ( err < 0) {
+        ALOGE("%s: Failed to get build info", __FUNCTION__);
+        goto error;
+    }
+error:
+    return err;
+
+}
+
 
 int rome_set_baudrate_req(int fd)
 {
@@ -1351,7 +1445,7 @@ int rome_set_baudrate_req(int fd)
 
     /* Total length of the packet to be sent to the Controller */
     size = (HCI_CMD_IND + HCI_COMMAND_HDR_SIZE + VSC_SET_BAUDRATE_REQ_LEN);
-
+    tcflush(fd,TCIOFLUSH);
     /* Flow off during baudrate change */
     if ((err = userial_vendor_ioctl(USERIAL_OP_FLOW_OFF , &flags)) < 0)
     {
@@ -1360,7 +1454,7 @@ int rome_set_baudrate_req(int fd)
     }
 
     /* Send the HCI command packet to UART for transmission */
-    err = write(fd, cmd, size);
+    err = do_write(fd, cmd, size);
     if (err != size) {
         ALOGE("%s: Send failed with ret value: %d", __FUNCTION__, err);
         goto error;
@@ -1426,7 +1520,7 @@ int rome_hci_reset_req(int fd)
 
     /* Send the HCI command packet to UART for transmission */
     ALOGI("%s: HCI CMD: 0x%x 0x%x 0x%x 0x%x\n", __FUNCTION__, cmd[0], cmd[1], cmd[2], cmd[3]);
-    err = write(fd, cmd, size);
+    err = do_write(fd, cmd, size);
     if (err != size) {
         ALOGE("%s: Send failed with ret value: %d", __FUNCTION__, err);
         goto error;
@@ -1474,7 +1568,7 @@ int rome_hci_reset(int fd)
 
     /* Total length of the packet to be sent to the Controller */
     size = (HCI_CMD_IND + HCI_COMMAND_HDR_SIZE);
-    err = write(fd, cmd, size);
+    err = do_write(fd, cmd, size);
     if (err != size) {
         ALOGE("%s: Send failed with ret value: %d", __FUNCTION__, err);
         err = -1;
@@ -1557,10 +1651,10 @@ int addon_feature_req(int fd)
     cmd_hdr->plen     = 0x00;
 
     /* Total length of the packet to be sent to the Controller */
-    size = (HCI_CMD_IND + HCI_COMMAND_HDR_SIZE + EDL_WIP_QUERY_CHARGING_STATUS_LEN);
+    size = (HCI_CMD_IND + HCI_COMMAND_HDR_SIZE);
 
     ALOGD("%s: Sending HCI_VS_GET_ADDON_FEATURES_SUPPORT", __FUNCTION__);
-    ALOGD("HCI-CMD: \t0x%x \t0x%x \t0x%x \t0x%x \t0x%x", cmd[0], cmd[1], cmd[2], cmd[3], cmd[4]);
+    ALOGD("HCI-CMD: \t0x%x \t0x%x \t0x%x \t0x%x", cmd[0], cmd[1], cmd[2], cmd[3]);
     err = hci_send_vs_cmd(fd, (unsigned char *)cmd, rsp, size);
     if ( err != size) {
         ALOGE("Failed to send HCI_VS_GET_ADDON_FEATURES_SUPPORT command!");
@@ -1643,7 +1737,7 @@ error:
 }
 
 
-static void enable_controller_log (int fd)
+void enable_controller_log (int fd, unsigned char wait_for_evt)
 {
    int ret = 0;
    /* VS command to enable controller logging to the HOST. By default it is disabled */
@@ -1651,16 +1745,28 @@ static void enable_controller_log (int fd)
    unsigned char rsp[HCI_MAX_EVENT_SIZE];
    char value[PROPERTY_VALUE_MAX] = {'\0'};
 
-   property_get("enablebtsoclog", value, "false");
+   property_get("persist.service.bdroid.soclog", value, "false");
 
    // value at cmd[5]: 1 - to enable, 0 - to disable
    ret = (strcmp(value, "true") == 0) ? cmd[5] = 0x01: 0;
    ALOGI("%s: %d", __func__, ret);
+   /* Ignore vsc evt if wait_for_evt is true */
+   if (wait_for_evt) wait_vsc_evt = FALSE;
 
    ret = hci_send_vs_cmd(fd, (unsigned char *)cmd, rsp, 6);
    if (ret != 6) {
-     ALOGE("%s: command failed", __func__);
+       ALOGE("%s: command failed", __func__);
    }
+   /*Ignore hci_event if wait_for_evt is true*/
+   if (wait_for_evt)
+       goto end;
+   ret = read_hci_event(fd, rsp, HCI_MAX_EVENT_SIZE);
+   if (ret < 0) {
+       ALOGE("%s: Failed to get CC for enable SoC log", __FUNCTION__);
+   }
+end:
+   wait_vsc_evt = TRUE;
+   return;
 }
 
 
@@ -1672,7 +1778,7 @@ static int disable_internal_ldo(int fd)
         unsigned char rsp[HCI_MAX_EVENT_SIZE];
 
         ALOGI(" %s ", __FUNCTION__);
-        ret = write(fd, cmd, 5);
+        ret = do_write(fd, cmd, 5);
         if (ret != 5) {
             ALOGE("%s: Send failed with ret value: %d", __FUNCTION__, ret);
             ret = -1;
@@ -1690,7 +1796,7 @@ static int disable_internal_ldo(int fd)
 int rome_soc_init(int fd, char *bdaddr)
 {
     int err = -1, size = 0;
-
+    dnld_fd = fd;
     ALOGI(" %s ", __FUNCTION__);
 
     /* If wipower charging is going on in embedded mode then start hand off req */
@@ -1775,11 +1881,13 @@ int rome_soc_init(int fd, char *bdaddr)
             rampatch_file_path = ROME_RAMPATCH_TLV_3_0_0_PATH;
             nvm_file_path = ROME_NVM_TLV_3_0_0_PATH;
             fw_su_info = ROME_3_1_FW_SU;
+            fw_su_offset = ROME_3_1_FW_SW_OFFSET;
             goto download;
         case ROME_VER_3_2:
             rampatch_file_path = ROME_RAMPATCH_TLV_3_0_2_PATH;
             nvm_file_path = ROME_NVM_TLV_3_0_2_PATH;
             fw_su_info = ROME_3_2_FW_SU;
+            fw_su_offset =  ROME_3_2_FW_SW_OFFSET;
 
 download:
             /* Change baud rate 115.2 kbps to 3Mbps*/
@@ -1796,14 +1904,13 @@ download:
                 goto error;
             }
             ALOGI("%s: Download TLV file successfully ", __FUNCTION__);
-            /* This function sends a vendor specific command to enable/disable
-             * controller logs on need. Once the command is received to the SOC,
-             * It would start sending cotroller's print strings and LMP RX/TX
-             * packets to the HOST (over the UART) which will be logged in QXDM.
-             * The property 'enablebtsoclog' used to send this command on BT init
-             * sequence.
-             */
-            enable_controller_log(fd);
+
+            /* Get SU FM label information */
+            if((err = rome_get_build_info_req(fd)) <0){
+                ALOGI("%s: Fail to get Rome FW SU Build info (0x%x)", __FUNCTION__, err);
+                //Ignore the failure of ROME FW SU label information
+                err = 0;
+            }
 
             /* Disable internal LDO to use external LDO instead*/
             err = disable_internal_ldo(fd);
@@ -1826,5 +1933,6 @@ download:
     }
 
 error:
+    dnld_fd = -1;
     return err;
 }
