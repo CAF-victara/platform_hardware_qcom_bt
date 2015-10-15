@@ -18,7 +18,6 @@
 #define BT_VENDOR_QCOM_H
 
 #include "bt_vendor_lib.h"
-#include "utils.h"
 //#include "vnd_buildcfg.h"
 
 #ifndef FALSE
